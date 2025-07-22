@@ -7,7 +7,7 @@ import pandas as pd
 import torch
 import pytorch_lightning as pl
 from pytorch_lightning.callbacks import EarlyStopping, ModelCheckpoint
-from pytorch_lightning.loggers import CSVLogger
+from pytorch_lightning.loggers import CSVLogger, WandbLogger
 import matplotlib.pyplot as plt
 import enum
 import os
@@ -19,6 +19,12 @@ import csv
 # import helper scripts (you can change this if you want but check out https://www.nature.com/articles/s41467-024-50712-3)
 from MLP import (SeqFcnDataset, ProtDataModule, MLP)
 
+import wandb
+from tqdm import tqdm
+from datetime import datetime
+# Get current date
+current_date = datetime.now().strftime("%Y-%m-%d")
+
 # Parameters to update
 data_filepath = ''
 num_muts_threshold = 4 # variants with this number of mutations or less will be in training set
@@ -27,42 +33,73 @@ percent_validation_split = 75 # defines percent of variants with num_muts_of_val
 learning_rate = 1e-6
 batch_size = 128
 epochs = 2000
+# epochs = 10
 num_models = 100 # number of models in ensemble
+# num_models = 10
 patience = 400 # patience for EarlyStopping, I recommend training ensemble for awhile after loss plateaus
-WT = 'MAGLRHTFVVADATLPDCPLVYASEGFYAMTGYGPDEVLGHNARFLQGEGTDPKEVQKIRDAIKKGEACSVRLLNYRKDGTPFWNLLTVTPIKTPDGRVSKFVGVQVDVTSKTEGKALA' # parent sequence
+#CreiLOV
+# WT = 'MAGLRHTFVVADATLPDCPLVYASEGFYAMTGYGPDEVLGHNARFLQGEGTDPKEVQKIRDAIKKGEACSVRLLNYRKDGTPFWNLLTVTPIKTPDGRVSKFVGVQVDVTSKTEGKALA' # parent sequence
+#avgfp
+type = 'avgfp'
+WT = 'MSKGEELFTGVVPILVELDGDVNGHKFSVSGEGEGDATYGKLTLKFICTTGKLPVPWPTLVTTLSYGVQCFSRYPDHMKQHDFFKSAMPEGYVQERTIFFKDDGNYKTRAEVKFEGDTLVNRIELKGIDFKEDGNILGHKLEYNYNSHNVYIMADKQKNGIKVNFKIRHNIEDGSVQLADHYQQNTPIGDGPVLLPDNHYLSTQSALSKDPNEKRDHMVLLEFVTAAGITHGMDELYK' # parent sequence
 slen = len(WT) # length of parent sequence
+print("Parent sequence length:", slen)
 
 # load data
-df = pd.read_pickle(f"{data_filepath}SeqFxnDataset.pkl") # load preprocessed data with Sequence and Score column
+# df = pd.read_pickle(f"{data_filepath}SeqFxnDataset.pkl") # load preprocessed data with Sequence and Score column
+df = pd.read_pickle(f"{data_filepath}SeqFxnDataset_avgfp.pkl") 
 # df.head()
 
 # create data splits for SeqFxnDataset
-splits_path = f'.{data_filepath}/SeqFxnDataset_splits.pkl'
+# splits_path = f'.{data_filepath}/SeqFxnDataset_splits.pkl'
+splits_path = f'.{data_filepath}/SeqFxnDataset_splits_avgfp.pkl'
 dm = ProtDataModule(df, num_muts_threshold, num_muts_of_val_test_splits, percent_validation_split, batch_size=None, splits_path=None)
 dm.save_splits(splits_path)
 
 # load data for model
 dm = ProtDataModule(df, num_muts_threshold, num_muts_of_val_test_splits, percent_validation_split, batch_size, splits_path)
 
+# RUN NAME
+run_group_name = f"{type}_{current_date}_reward_models_ensemble_training_{num_models}_models"
 # ############################################################## train reward models ##############################################################
 model_savepath = './reward_models'
 os.makedirs(model_savepath, exist_ok=True)
-for i in range(num_models):
+for i in tqdm(range(num_models), desc="Training ensemble models"):
     model = MLP(learning_rate, batch_size, epochs, slen) # Resubstantiate the model for each training iteration
+    model = model.to('cuda' if torch.cuda.is_available() else 'cpu')  # Move model to GPU if available
     print(f"Model {i} is trained on: {model.device}")
     logger_name = f'reward_model'
-    logger = CSVLogger('logs', name=logger_name)
+    csv_logger = CSVLogger('logs', name=logger_name)
+    wandb_logger = WandbLogger(
+        project="RLXF",
+        name=f"reward_model_v{i}",
+        group=run_group_name,
+        config={
+            "learning_rate": learning_rate,
+            "batch_size": batch_size,
+            "epochs": epochs,
+            "num_models": num_models,
+            "num_muts_threshold": num_muts_threshold,
+            "num_muts_of_val_test_splits": num_muts_of_val_test_splits,
+            "percent_validation_split": percent_validation_split,
+            "sequence_len": slen,
+            "type": type,
+            "WT": WT},
+    )
+    logger = [csv_logger, wandb_logger]
     checkpoint_callback = ModelCheckpoint(dirpath=model_savepath,filename=f'reward_model_v{i}',monitor='val_loss',mode='min',save_top_k=1) # Define the model checkpoint callback with version number in the filename
     early_stopping = EarlyStopping(monitor='val_loss', patience=patience, mode='min') # Use early stopping
-    trainer = pl.Trainer(logger=logger, max_epochs=epochs, callbacks=[early_stopping, checkpoint_callback], enable_progress_bar=False) # Trainer with early stopping and checkpointing
+    trainer = pl.Trainer(logger=logger, max_epochs=epochs, callbacks=[early_stopping, checkpoint_callback], enable_progress_bar=True) # Trainer with early stopping and checkpointing
+    print(model, "\ndm", dm.batch_size)
     trainer.fit(model, dm) # Train the model
     metrics_file_name = f'metrics.csv'
     pt_metrics = pd.read_csv(f'logs/reward_model/version_{i}/metrics.csv')
+    wandb.finish()  # Finish the wandb run for this model
 
 ############################################################## plot loss curves ##############################################################
 train_losses = []
 val_losses = []
-for i in range(num_models):
+for i in tqdm(range(num_models), desc="Processing loss curves"):
     try:
         pt_metrics = pd.read_csv(f'logs/reward_model/version_{i}/metrics.csv')
         train = pt_metrics[~pt_metrics.train_loss.isna()]
@@ -106,7 +143,7 @@ plt.savefig(file_path, bbox_inches='tight')
 all_Y_values = [[] for _ in range(len(df.iloc[dm.test_idx]))]  # List of lists to store predictions for each sequence
 
 # Scores Test Sequences for Models
-for i in range(num_models):
+for i in tqdm(range(num_models), desc="Evaluating models on test set"):
     model = MLP(learning_rate, batch_size, epochs, slen)
     model_path = f'{model_savepath}/reward_model_v{i}.ckpt'
     checkpoint = torch.load(model_path)
@@ -148,8 +185,25 @@ metrics_data = [['MSE', 'Pearson R', "Spearman's Rho"], [mse, r, rho]]
 csv_file_path = plot_file_path.replace('.png', '.csv')
 with open(csv_file_path, mode='w', newline='') as file:
     writer = csv.writer(file)
-    writer.writerows(metrics_data)
+    writer.writerows(metrics_data)  
 
+# Initialize wandb run for evaluation
+wandb.init(
+    project="RLXF",
+    name=f"{type}_ensemble_evaluation",
+    group=run_group_name,
+)
+# Log loss curve to wandb
+wandb.log({"Loss Curve": wandb.Image(file_path)})
 
+# Log ensemble performance comparison
+wandb.log({
+    "ensemble_result/ensemble_median_mse": mse,
+    "ensemble_result/ensemble_median_pearson_r": r,
+    "ensemble_result/ensemble_median_spearman_rho": rho,
+})
 
+# Log the plot to wandb
+wandb.log({"Test Results": wandb.Image(plot_file_path)})
 
+wandb.finish()  # Finish the wandb run
