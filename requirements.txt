@@ -1,0 +1,9 @@
+torch==2.3.0
+pytorch-lightning==2.0.3
+torchmetrics==1.1.2
+torchtext==0.18.0
+numpy==1.26.3
+pandas==1.5.3
+transformers==4.40.1
+matplotlib
+scikit-learn
