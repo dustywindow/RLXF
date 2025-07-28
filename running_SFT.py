@@ -3,7 +3,7 @@ import numpy as np
 import pandas as pd
 import torch
 import pytorch_lightning as pl
-from pytorch_lightning.loggers import CSVLogger
+from pytorch_lightning.loggers import CSVLogger, WandbLogger
 import seaborn as sns
 import random
 from random import choice
@@ -22,10 +22,20 @@ import matplotlib.patches as mpatches
 from functions import (mask_mutations, generate_df, generate_and_evaluate_mutants_p_sampling)
 from SFT_ESM2 import (SFT_ESM2, SFTDataModule)
 
+import wandb
+from tqdm import tqdm
+from datetime import datetime
+# Get current date
+current_date = datetime.now().strftime("%Y-%m-%d")
+
 # Parameters to update
+type = 'CreiLOV'
 WT = 'MAGLRHTFVVADATLPDCPLVYASEGFYAMTGYGPDEVLGHNARFLQGEGTDPKEVQKIRDAIKKGEACSVRLLNYRKDGTPFWNLLTVTPIKTPDGRVSKFVGVQVDVTSKTEGKALA' # CreiLOV
+# type = 'avgfp'
+# WT = 'MSKGEELFTGVVPILVELDGDVNGHKFSVSGEGEGDATYGKLTLKFICTTGKLPVPWPTLVTTLSYGVQCFSRYPDHMKQHDFFKSAMPEGYVQERTIFFKDDGNYKTRAEVKFEGDTLVNRIELKGIDFKEDGNILGHKLEYNYNSHNVYIMADKQKNGIKVNFKIRHNIEDGSVQLADHYQQNTPIGDGPVLLPDNHYLSTQSALSKDPNEKRDHMVLLEFVTAAGITHGMDELYK' # parent sequence
 sequence_length = len(WT)
-num_reward_models = 100
+# num_reward_models = 100
+num_reward_models = 2
 
 # model parameters
 model_identifier ='esm2_t33_650M_UR50D' # esm2_t6_8M_UR50D # esm2_t12_35M_UR50D # esm2_t30_150M_UR50D # esm2_t33_650M_UR50D
@@ -91,16 +101,64 @@ df = pd.read_pickle("./unique_optimized_designs_from_simulated_annealing.pkl") #
 df['Masked_Sequence'] = df['Sequence'].apply(lambda seq: mask_mutations(seq, WT))
 # print(df.head(1))
 
+# RUN NAME
+run_group_name = f"{type}_{current_date}_SFT_training"
+
+# GPU 설정 확인
+print(f"사용 가능한 GPU 개수: {torch.cuda.device_count()}")
+accelerator = "gpu" if torch.cuda.is_available() else "cpu"
+devices = [0,1]  # 또는 [0, 1]로 특정 GPU 지정 가능
+strategy = "ddp" if torch.cuda.device_count() > 1 else "auto"  # DDP (Distributed Data Parallel) 사용
 ############################################################################################################################################################
 
 # SFT ESM2
 logger_name = f'SFT_{model_identifier}'
-logger = CSVLogger('logs', name=logger_name, version=None)
-version = logger.version # Retrieve the version number from the logger
+csv_logger = CSVLogger('logs', name=logger_name, version=None)
+wandb_logger = WandbLogger(
+        project="RLXF",
+        name=f"SFT_{model_identifier}_{type}_{num_reward_models}_reward_models",
+        group=run_group_name,
+        config={
+            "model_parameters" : {
+                "model_identifier": model_identifier,
+                "max_num_layers_unfreeze_each_epoch": max_num_layers_unfreeze_each_epoch,
+                "num_unfrozen_layers": num_unfrozen_layers,
+                "num_layers_unfreeze_each_epoch": num_layers_unfreeze_each_epoch
+            },
+            "SFT_parameters": {
+                "seed": seed,
+                "batch_size": batch_size,
+                "epochs": epochs,
+                "random_masking": random_masking
+            },
+            "optimizer_hyperparameters": {
+                "learning_rate": learning_rate,
+                "lr_mult": lr_mult,
+                "WD": WD,
+                "grad_clip_threshold": grad_clip_threshold
+            },
+            "generation_parameters": {
+                "num_designs": num_designs,
+                "num_muts": num_muts,
+                "high_conf_threshold": high_conf_threshold,
+                "cum_prob_threshold": cum_prob_threshold,
+                "ep": ep,
+                "generation_seed": generation_seed,
+                "predicted_wt_score": predicted_wt_score
+            },
+            "num_reward_models": num_reward_models,
+            "sequence_len": sequence_length,
+            "type": type,
+            "WT": WT},
+    )
+logger = [csv_logger, wandb_logger]
+version = csv_logger.version # Retrieve the version number from the logger
 dm = SFTDataModule(df, batch_size, seed)
 model = SFT_ESM2(WT, ESM2, reward_models, seed, learning_rate, lr_mult, WD, grad_clip_threshold, epochs, num_unfrozen_layers, num_layers_unfreeze_each_epoch, max_num_layers_unfreeze_each_epoch, batch_size, random_masking, model_identifier)
-trainer = pl.Trainer(logger=logger, max_epochs=epochs, enable_progress_bar=False, log_every_n_steps=1, accelerator = "gpu", devices = 1)
+# trainer = pl.Trainer(logger=logger, max_epochs=epochs, enable_progress_bar=False, log_every_n_steps=1, accelerator = "gpu", devices = 1)
+trainer = pl.Trainer(logger=logger, max_epochs=epochs, enable_progress_bar=True, log_every_n_steps=1, accelerator=accelerator, devices=devices, strategy=strategy)
 trainer.fit(model,dm)
+wandb.finish()  # Finish the wandb run
 
 # Save the sft_updated_esm2 model when training is done, appending the version number to the filename
 model.save_sft_updated_esm2(f'./logs/{logger_name}/version_{version}/SFT_{model_identifier}_v{version}.pt')
@@ -245,10 +303,6 @@ with torch.no_grad():
     plt.savefig(f'./logs/{logger_name}/version_{version}/{model_identifier}_design_scores.png')
 
     print('Saved design histograms')
-
-
-
-
 
 
 
