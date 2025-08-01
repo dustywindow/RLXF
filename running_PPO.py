@@ -14,7 +14,8 @@ import torch.utils.data as data_utils
 from torch.utils.data import Dataset, DataLoader
 import torch.distributed as dist
 import pytorch_lightning as pl
-from pytorch_lightning.loggers import CSVLogger
+from pytorch_lightning.callbacks import EarlyStopping, ModelCheckpoint
+from pytorch_lightning.loggers import CSVLogger, WandbLogger
 import seaborn as sns
 import random
 from random import choice
@@ -36,12 +37,19 @@ from MLP import MLP
 from PPO_ESM2 import PPO_ESM2
 from functions import (generate_df, generate_and_evaluate_mutants_p_sampling)
 
+import wandb
+from tqdm import tqdm
+from datetime import datetime
+# Get current date
+current_date = datetime.now().strftime("%Y-%m-%d")
+
 ################################################## hyperparameters ##################################################
 
 # parameters to update
 sft_logger_version = 0
 model_identifier ='esm2_t33_650M_UR50D' # esm2_t6_8M_UR50D # esm2_t12_35M_UR50D # esm2_t30_150M_UR50D # esm2_t33_650M_UR50D
-num_reward_models = 100 # We have an ensemble of 100 MLP reward models
+# num_reward_models = 100 # We have an ensemble of 100 MLP reward models
+num_reward_models = 2
 
 # model architexture dependent
 max_num_layers_unfreeze_each_epoch = 82 # max number of layers in ESM2 (650M) that will be trained
@@ -55,17 +63,21 @@ lr_mult = 0.8847762860054206
 lr_mult_factor = 1
 
 # optimizer hyperparameters
-WD = 0.009951801658490985
+WD = 0.009951801658490985 #weight decay
 grad_clip_threshold = 6.824466143373183
 grad_clip_threshold_factor = 1.2
 
 # training hyperparameters
 seed = 2549
-epochs = 2
+epochs = 100
 iterations = 1
+patience = 10  # early stopping patience, 개선이 없을 경우 기다릴 에포크 수
 
 # generating design hyperparameters
+type = 'CreiLOV'
 WT = 'MAGLRHTFVVADATLPDCPLVYASEGFYAMTGYGPDEVLGHNARFLQGEGTDPKEVQKIRDAIKKGEACSVRLLNYRKDGTPFWNLLTVTPIKTPDGRVSKFVGVQVDVTSKTEGKALA'
+# type = 'avgfp'
+# WT = 'MSKGEELFTGVVPILVELDGDVNGHKFSVSGEGEGDATYGKLTLKFICTTGKLPVPWPTLVTTLSYGVQCFSRYPDHMKQHDFFKSAMPEGYVQERTIFFKDDGNYKTRAEVKFEGDTLVNRIELKGIDFKEDGNILGHKLEYNYNSHNVYIMADKQKNGIKVNFKIRHNIEDGSVQLADHYQQNTPIGDGPVLLPDNHYLSTQSALSKDPNEKRDHMVLLEFVTAAGITHGMDELYK' # parent sequence
 num_sequences = 2 # initial batch size during PPO
 inc_batch_size = 1 # increasing batch size each epoch until max_batch_size reached
 max_batch_size = 10 # max batch size (dependent on GPU memory)
@@ -94,6 +106,16 @@ cum_prob_threshold = 0.25
 ep = epochs - 1
 generation_seed = 7028
 predicted_wt_score = 1.1498 # predicted wildtype score as reference for evaluations
+
+# RUN NAME
+run_group_name = f"{type}_{current_date}_PPO_training"
+
+# GPU 설정 확인
+print(f"사용 가능한 GPU 개수: {torch.cuda.device_count()}")
+accelerator = "gpu" if torch.cuda.is_available() else "cpu"
+devices = [0,1]  # 또는 [0, 1]로 특정 GPU 지정 가능
+strategy = "ddp" if torch.cuda.device_count() > 1 else "auto"  # DDP (Distributed Data Parallel) 사용
+
 
 ################################################## hyperparameters ##################################################
 
@@ -147,7 +169,9 @@ if torch.cuda.is_available():
     
     # Determine if training via DDP or single GPU
     if num_devices > 1:
-        from PPO_ESM2 import (ProtDataModuleESM2_DDP, ProtRepDatasetESM2_DDP)
+        # from PPO_ESM2 import (ProtDataModuleESM2_DDP, ProtRepDatasetESM2_DDP)
+        from PPO_ESM2 import ProtDataModuleESM2_DDP as ProtDataModuleESM2
+        from PPO_ESM2 import  ProtRepDatasetESM2_DDP as ProtRepDatasetESM2
     else:
         from PPO_ESM2 import (ProtDataModuleESM2, ProtRepDatasetESM2)
         print('Running on single GPU, using alternative dataloader')
@@ -168,8 +192,56 @@ else:
     print(f"Accelerator: {accelerator}, Number of threads: {num_threads}, Strategy: {strategy}")
 
 # Align with PPO
-logger = CSVLogger('logs', name=f"PPO_{model_identifier}")
-version = logger.version
+csv_logger = CSVLogger('logs', name=f"PPO_{model_identifier}")
+wandb_logger = WandbLogger(
+        project="RLXF",
+        name=f"PPO_{model_identifier}_{type}_{num_reward_models}_reward_models_{epochs}_epochs_{seed}_seed",
+        group=run_group_name,
+        config={
+            "model_parameters" : {
+                "model_identifier": model_identifier,
+                "max_num_layers_unfreeze_each_epoch": max_num_layers_unfreeze_each_epoch,
+                "num_unfrozen_layers": num_unfrozen_layers,
+                "num_layers_unfreeze_each_epoch": num_layers_unfreeze_each_epoch,
+                "epoch_threshold_to_unlock_ESM2": epoch_threshold_to_unlock_ESM2
+            },
+            "PPO_parameters": {
+                "seed": seed,
+                "epochs": epochs,
+                "iterations": iterations,
+                "rel_to_WT": rel_to_WT,
+                "epsilon": epsilon
+            },
+            "reward_hyperparameters": {
+                "pairwise_hd_aver_factor": pairwise_hd_aver_factor,
+                "dkl_scale_init": dkl_scale_init,
+                "dkl_scale": dkl_scale
+            },
+            "optimizer_hyperparameters": {
+                "learning_rate": learning_rate,
+                "lr_mult": lr_mult,
+                "lr_mult_factor": lr_mult_factor,
+                "WD": WD,
+                "grad_clip_threshold": grad_clip_threshold,
+                "grad_clip_threshold_factor": grad_clip_threshold_factor
+            },
+            "generation_parameters": {
+                "num_designs": num_designs,
+                "num_muts": num_muts,
+                "high_conf_threshold": high_conf_threshold,
+                "cum_prob_threshold": cum_prob_threshold,
+                "ep": ep,
+                "generation_seed": generation_seed,
+                "predicted_wt_score": predicted_wt_score
+            },
+            "num_reward_models": num_reward_models,
+            "sequence_len": len(WT),
+            "type": type,
+            "WT": WT},
+    )
+logger = [csv_logger, wandb_logger]
+version = csv_logger.version
+# early_stopping = EarlyStopping(monitor='rel_WT_fitness', min_delta=0.005, patience=patience, mode='max', check_on_train_epoch_end=True) # Use early stopping
 dm = ProtDataModuleESM2(WT, batch_size=1, seed=seed) # Loading WT to dataloader, we generate variant designs each batch so only load WT initially to models
 model = PPO_ESM2(model_identifier, sft_model, rl_updated_model, reward_models, tokenizer, num_reward_models, sft_model_path, # model selections
                 num_unfrozen_layers, num_layers_unfreeze_each_epoch, max_num_layers_unfreeze_each_epoch, # model dependent hyperparameters
@@ -191,7 +263,8 @@ if strategy == "ddp":
         accelerator=accelerator,
         num_nodes=1,
         devices=num_devices,
-        strategy=strategy
+        strategy=strategy,
+        # callbacks=[early_stopping]
         )
 else:
     trainer = pl.Trainer(
@@ -202,9 +275,11 @@ else:
         log_every_n_steps=1,
         accelerator=accelerator,
         num_nodes=1,
-        devices=num_devices
+        devices=num_devices,
+        # callbacks=[early_stopping]
         )
 trainer.fit(model, dm)
+wandb.finish()  # Finish the wandb run for this model
 
 # Plot metrics
 pt_metrics = pd.read_csv(f'{save_filepath}/version_{version}/metrics.csv')
