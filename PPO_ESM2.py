@@ -133,10 +133,13 @@ class PPO_ESM2(pl.LightningModule):
 
         # Save hyperparameters, excluding certain arguments
         self.save_hyperparameters(ignore=["sft_model", "rl_updated_model", "reward_models", "tokenizer"]) # log hyperparameters to file
-
+        
+        # save hyperparameters to a file
+        # self.save_every_n_epochs = 10
+        self.save_every_n_epochs = 1
     def training_step(self, batch):
         current_beta = self.beta_init if self.current_epoch < 10 else self.beta
-        print(f"iteration 1")
+        # print(f"iteration 1")
 
         # Generate single mutant log probs for fixed model during the first epoch
         if self.current_epoch == 0:
@@ -234,9 +237,10 @@ class PPO_ESM2(pl.LightningModule):
             self.log("median_ratio_final_iter", median_ratio_iter, prog_bar=False, logger=True, on_step=True, on_epoch=False)
             self.log("ppo_loss_final_iter", ppo_loss_final_iter, prog_bar=True, logger=True, on_step=True, on_epoch=False)
         
-        # Use the logger version number in the filename
-        self.save_rl_updated_esm2()
-        print(f'Saving models at epoch {self.current_epoch}')
+        if (self.current_epoch != 0) & ((self.current_epoch+1) % self.save_every_n_epochs == 0):
+            # Use the logger version number in the filename
+            self.save_rl_updated_esm2()
+            print(f'Saving models at epoch {self.current_epoch}')
 
         return rel_WT_fitness
     
@@ -313,7 +317,7 @@ class PPO_ESM2(pl.LightningModule):
                 torch.cuda.empty_cache() # Frees 2.722 GB
             
             # Save heatmap at beginning of every 10 epochs for WT single mutant probability space (1st iteration)
-            if self.current_epoch % 1 == 0 and init_seq is None:
+            if (self.current_epoch+1) % self.save_every_n_epochs == 0 and init_seq is None:
                 self.generate_heatmap(self.WT, new_log_states, self.model_identifier, self.WT, f'./logs/{self.filepath}', self.logger_version, self.tokenizer)
                 print(f'Saved heatmap for single mutant space from WT for aligned model')
 
@@ -536,7 +540,7 @@ class PPO_ESM2(pl.LightningModule):
         # Identify positions using self.cum_prob_threshold to explore mutating for the 1st iteration of epoch and generate designs from aligned model
         if new_sampling:
             # Save heatmap every 5 epochs for rl_high_conf_seq single mutant probability space (1st iteration)
-            if self.current_epoch % 1 == 0:
+            if (self.current_epoch+1) % self.save_every_n_epochs == 0:
                 self.generate_heatmap(self.WT, new_log_states_with_high_conf_mutations, self.model_identifier, rl_high_conf_seq, f'./logs/{self.filepath}', self.logger_version, self.tokenizer)
                 print(f'Saved heatmap for single mutant space from sequence with high confidence mutations for aligned model')
 
