@@ -34,25 +34,26 @@ learning_rate = 1e-6
 batch_size = 128
 epochs = 2000
 # epochs = 10
-num_models = 100 # number of models in ensemble
-# num_models = 10
+# num_models = 100 # number of models in ensemble
+num_models = 2
 patience = 400 # patience for EarlyStopping, I recommend training ensemble for awhile after loss plateaus
 #CreiLOV
-# WT = 'MAGLRHTFVVADATLPDCPLVYASEGFYAMTGYGPDEVLGHNARFLQGEGTDPKEVQKIRDAIKKGEACSVRLLNYRKDGTPFWNLLTVTPIKTPDGRVSKFVGVQVDVTSKTEGKALA' # parent sequence
+type = 'CreiLOV'
+WT = 'MAGLRHTFVVADATLPDCPLVYASEGFYAMTGYGPDEVLGHNARFLQGEGTDPKEVQKIRDAIKKGEACSVRLLNYRKDGTPFWNLLTVTPIKTPDGRVSKFVGVQVDVTSKTEGKALA' # parent sequence
 #avgfp
-type = 'avgfp'
-WT = 'MSKGEELFTGVVPILVELDGDVNGHKFSVSGEGEGDATYGKLTLKFICTTGKLPVPWPTLVTTLSYGVQCFSRYPDHMKQHDFFKSAMPEGYVQERTIFFKDDGNYKTRAEVKFEGDTLVNRIELKGIDFKEDGNILGHKLEYNYNSHNVYIMADKQKNGIKVNFKIRHNIEDGSVQLADHYQQNTPIGDGPVLLPDNHYLSTQSALSKDPNEKRDHMVLLEFVTAAGITHGMDELYK' # parent sequence
+# type = 'avgfp'
+# WT = 'MSKGEELFTGVVPILVELDGDVNGHKFSVSGEGEGDATYGKLTLKFICTTGKLPVPWPTLVTTLSYGVQCFSRYPDHMKQHDFFKSAMPEGYVQERTIFFKDDGNYKTRAEVKFEGDTLVNRIELKGIDFKEDGNILGHKLEYNYNSHNVYIMADKQKNGIKVNFKIRHNIEDGSVQLADHYQQNTPIGDGPVLLPDNHYLSTQSALSKDPNEKRDHMVLLEFVTAAGITHGMDELYK' # parent sequence
 slen = len(WT) # length of parent sequence
 print("Parent sequence length:", slen)
 
 # load data
 # df = pd.read_pickle(f"{data_filepath}SeqFxnDataset.pkl") # load preprocessed data with Sequence and Score column
-df = pd.read_pickle(f"{data_filepath}SeqFxnDataset_avgfp.pkl") 
+df = pd.read_pickle(f"{data_filepath}CreiLOV_4cluster_df.pkl") 
 # df.head()
 
 # create data splits for SeqFxnDataset
 # splits_path = f'.{data_filepath}/SeqFxnDataset_splits.pkl'
-splits_path = f'.{data_filepath}/SeqFxnDataset_splits_avgfp.pkl'
+splits_path = f'.{data_filepath}/SeqFxnDataset_splits_CreiLOV.pkl'
 dm = ProtDataModule(df, num_muts_threshold, num_muts_of_val_test_splits, percent_validation_split, batch_size=None, splits_path=None)
 dm.save_splits(splits_path)
 
@@ -150,7 +151,7 @@ for i in tqdm(range(num_models), desc="Evaluating models on test set"):
     model.load_state_dict(checkpoint['state_dict'])
     model.eval()
     test_data_frame = df.iloc[list(dm.test_idx)].copy()  # Use the test index from DataModule
-    Y = [model.predict(j).item() for j in test_data_frame['sequence']]
+    Y = [model.predict(j).item() for j in test_data_frame['Sequence']]
     for j, score in enumerate(Y):
         all_Y_values[j].append(score)
 
@@ -159,7 +160,7 @@ medians = [np.median(scores) for scores in all_Y_values]
 # variances = [np.var(scores) for scores in all_Y_values]
 
 # Calculating metrics
-actual_scores = test_data_frame['functional_score'].tolist()
+actual_scores = test_data_frame['log_mean'].tolist()
 mse = metrics.mean_squared_error(actual_scores, medians)
 r = np.corrcoef(actual_scores, medians)[0][1]
 rho, _ = spearmanr(actual_scores, medians)

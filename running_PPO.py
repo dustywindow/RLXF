@@ -69,7 +69,7 @@ grad_clip_threshold_factor = 1.2
 
 # training hyperparameters
 seed = 2549
-epochs = 100
+epochs = 1000
 iterations = 1
 patience = 10  # early stopping patience, 개선이 없을 경우 기다릴 에포크 수
 
@@ -80,7 +80,8 @@ WT = 'MAGLRHTFVVADATLPDCPLVYASEGFYAMTGYGPDEVLGHNARFLQGEGTDPKEVQKIRDAIKKGEACSVRLL
 # WT = 'MSKGEELFTGVVPILVELDGDVNGHKFSVSGEGEGDATYGKLTLKFICTTGKLPVPWPTLVTTLSYGVQCFSRYPDHMKQHDFFKSAMPEGYVQERTIFFKDDGNYKTRAEVKFEGDTLVNRIELKGIDFKEDGNILGHKLEYNYNSHNVYIMADKQKNGIKVNFKIRHNIEDGSVQLADHYQQNTPIGDGPVLLPDNHYLSTQSALSKDPNEKRDHMVLLEFVTAAGITHGMDELYK' # parent sequence
 num_sequences = 2 # initial batch size during PPO
 inc_batch_size = 1 # increasing batch size each epoch until max_batch_size reached
-max_batch_size = 10 # max batch size (dependent on GPU memory)
+# max_batch_size = 10 # max batch size (dependent on GPU memory)
+max_batch_size = 15
 num_mutations = 15 # number of mutations to add to WT
 high_conf_threshold = 0.9 # initial probability threshold to be considered high confidence mutation
 cum_prob_threshold = 0.22164310879955906 # initial cumulative probability threshold of non-WT resides to be considered candidate position to explore mutating

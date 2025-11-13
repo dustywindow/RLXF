@@ -135,8 +135,8 @@ class PPO_ESM2(pl.LightningModule):
         self.save_hyperparameters(ignore=["sft_model", "rl_updated_model", "reward_models", "tokenizer"]) # log hyperparameters to file
         
         # save hyperparameters to a file
-        # self.save_every_n_epochs = 10
-        self.save_every_n_epochs = 1
+        self.save_every_n_epochs = 1000
+        # self.save_every_n_epochs = 1
     def training_step(self, batch):
         current_beta = self.beta_init if self.current_epoch < 10 else self.beta
         # print(f"iteration 1")
@@ -779,7 +779,8 @@ class PPO_ESM2(pl.LightningModule):
         # Emptying cache frees 0 MB here
 
         # Calculate fitness
-        predicted_WT_fitness = 4.1498 # Predicted WT score
+        # predicted_WT_fitness = 4.1498 # Predicted WT score
+        predicted_WT_fitness = 8.0
         rl_fitness_per_sequence = torch.quantile(scores_tensor, 0.05, dim=0)
         pre_fitness_per_sequence = torch.quantile(pre_scores_tensor, 0.05, dim=0)
         print(f"RL-updated mean fitness: {rl_fitness_per_sequence.mean()}")
@@ -803,7 +804,8 @@ class PPO_ESM2(pl.LightningModule):
 
         # Deleting scores_tensor, pre_scores_tensor does not save any space
 
-        return fitness_advantage, rel_WT_fitness
+        # return fitness_advantage, rel_WT_fitness
+        return rl_fitness, rel_WT_fitness
 
     def clipped_loss(self, ratios, total_reward):
         """ Computes clipped surrogate loss for update

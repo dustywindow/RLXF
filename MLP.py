@@ -28,8 +28,8 @@ class SeqFcnDataset(torch.utils.data.Dataset):
         self.aa2ind = aa2ind
 
     def __getitem__(self, idx):
-        sequence = torch.tensor(self.aa2ind(list(self.data_df.sequence.iloc[idx]))) # Extract sequence at index idx
-        labels = torch.tensor(self.data_df.iloc[idx]['functional_score']).float()
+        sequence = torch.tensor(self.aa2ind(list(self.data_df.Sequence.iloc[idx]))) # Extract sequence at index idx
+        labels = torch.tensor(self.data_df.iloc[idx]['log_mean']).float()
         return sequence, labels
 
     def __len__(self):
@@ -69,7 +69,7 @@ class ProtDataModule(pl.LightningDataModule):
                 
         else:
             # New logic for splitting based on mutation count
-            self.data_df['num_mutations'] = self.data_df['mutations'].apply(self.count_mutations)
+            self.data_df['num_mutations'] = self.data_df['Mutations'].apply(self.count_mutations)
             train_indices = []
             val_indices = []
             test_indices = []
