@@ -24,20 +24,21 @@ class GFlowNet(pl.LightningModule):
     def __init__(self,
                  rl_updated_model,
                  tokenizer,
+                 sft_model,
                  reward_model,
                  accelerator,
                  WT,
                  predicted_WT_fitness,
                  save_every_n_epochs,
                  pairwise_hd_aver_factor=1.0e-06,
-                 learning_rate=3e-2,
+                 learning_rate=6e-6,
                  number_generation=2,
                  subTB_lambda=1.0,
                  temperature=0.6,
                  max_new_tokens=800,
-                 num_mutations=5,
-                 high_conf_threshold=0.7,
-                 cum_prob_threshold=0.1,
+                 num_mutations=5, #15 # number of mutations to add to WT
+                 high_conf_threshold=0.7, #0.9 # initial probability threshold to be considered high confidence mutation
+                 cum_prob_threshold=0.1, #0.22164310879955906,  # initial cumulative probability threshold of non-WT resides to be considered candidate position to explore mutating
                  rel_to_WT=1,
                 ):
         super().__init__()
@@ -52,6 +53,9 @@ class GFlowNet(pl.LightningModule):
         self.rl_updated_model.to('cpu') # Do not need to clear cache. 0 MB freed
         self.tokenizer = tokenizer
         self.tokenizer.padding_side = 'left'
+        self.fixed_model = sft_model
+        self.fixed_model.bfloat16()
+        self.fixed_model.to('cpu') # Do not need to clear cache. 0 MB freed
         self.reward_models = reward_model
         self.learning_rate = learning_rate
         self.alpha = torch.zeros((10000,1), requires_grad=True)
@@ -66,6 +70,7 @@ class GFlowNet(pl.LightningModule):
         # ESM2 specific parameters
         self.num_mutations = num_mutations
         self.high_conf_threshold = high_conf_threshold
+        self.fixed_high_conf_seq = None
         self.cum_prob_threshold = cum_prob_threshold
         self.rel_to_WT = rel_to_WT
 
@@ -101,7 +106,7 @@ class GFlowNet(pl.LightningModule):
         scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=num_steps, eta_min=1e-8)
         return {"optimizer": optimizer, "lr_scheduler": {"scheduler": scheduler}}
     
-    def calculate_reward(self, mutated_seqs):
+    def calculate_reward(self, mutated_seqs, pretrained_mutated_seqs):
         """Calculate fitness for proteins created by the model"""
         print("Calculating rewards for mutated sequences...")
         self.batch_size = len(mutated_seqs)
@@ -125,7 +130,7 @@ class GFlowNet(pl.LightningModule):
                     scores_tensor[i, j] = score
 
                 # for j, seq in enumerate(pretrained_mutated_seqs):
-                #     score = model.predict(seq)[0][0]  # Extract score for the sequence from the current model
+                #     score = reward_model.predict(seq)[0][0]  # Extract score for the sequence from the current model
                 #     print(f"Score for sequence {j} by model {i}: {score}")
                 #     pre_scores_tensor[i, j] = score
 
@@ -136,26 +141,34 @@ class GFlowNet(pl.LightningModule):
         # Calculate fitness
         predicted_WT_fitness = self.predicted_WT_fitness # Predicted WT score
         rl_fitness_per_sequence = torch.quantile(scores_tensor, 0.05, dim=0)
-        # pre_fitness_per_sequence = torch.quantile(pre_scores_tensor, 0.05, dim=0)
+        pre_fitness_per_sequence = torch.quantile(pre_scores_tensor, 0.05, dim=0)
         print(f"RL-updated mean fitness: {rl_fitness_per_sequence.mean()}")
-        # print(f"Pre-trained mean fitness: {pre_fitness_per_sequence.mean()}")
+        print(f"Pre-trained mean fitness: {pre_fitness_per_sequence.mean()}")
 
         # Compute the overall fitness score based on average_type
         rl_fitness = rl_fitness_per_sequence.max()
-        # pre_fitness = pre_fitness_per_sequence.max()
+        pre_fitness = pre_fitness_per_sequence.max()
         rel_WT_fitness = rl_fitness / predicted_WT_fitness
 
         if self.rel_to_WT == 1:
             fitness_advantage = rel_WT_fitness
         else:
-            # fitness_advantage = ((rl_fitness - pre_fitness)/pre_fitness)*100
-            fitness_advantage = rl_fitness
+            fitness_advantage = ((rl_fitness - pre_fitness)/pre_fitness)*100
+            # fitness_advantage = rl_fitness
 
         self.current_rel_WT_fitness = rel_WT_fitness.item()
 
         pairwise_hd_aver, total_distance, num_pairs = self.average_pairwise_hamming_distance(mutated_seqs)
         # total_reward = (fitness_advantage + self.pairwise_hd_aver_factor*pairwise_hd_aver - current_beta * dkl_value)
-        total_reward = (fitness_advantage + self.pairwise_hd_aver_factor*pairwise_hd_aver)
+        # total_reward = (fitness_advantage + self.pairwise_hd_aver_factor*pairwise_hd_aver)
+        total_reward = fitness_advantage
+
+        # Logging
+        self.log("pairwise_hd_aver", pairwise_hd_aver, prog_bar=False, logger=True, on_step=True, on_epoch=False)
+        self.log("fitness_advantage", fitness_advantage, prog_bar=True, logger=True, on_step=True, on_epoch=False)
+        self.log("rel_WT_fitness", rel_WT_fitness, prog_bar=False, logger=True, on_step=False, on_epoch=True)
+        self.log("total_reward", total_reward, prog_bar=False, logger=True, on_step=True, on_epoch=False)
+        self.log('num_muts', float(self.num_mutations), on_step=True, on_epoch=False, prog_bar=False, logger=True)
 
         # return fitness_advantage, rel_WT_fitness
         return total_reward, rel_WT_fitness
@@ -163,15 +176,6 @@ class GFlowNet(pl.LightningModule):
     def sample(self):
         return self.ReplayBuffer.sample_weighted_and_remove(self.batch_size)
         #return self.ReplayBuffer.sample_weighted(self.batch_size)
-
-    # def save_model(self, path):
-    #     self.accelerator.wait_for_everyone()
-    #     unwrapped_model = self.accelerator.unwrap_model(self.model)
-    #     #unwrapped_model = unwrapped_model.merge_and_unload()
-    #     unwrapped_model.save_pretrained(path, is_main_process=self.accelerator.is_main_process, save_function=self.accelerator.save)
-    #     self.tokenizer.save_pretrained(path)
-    #     self.run.finish()
-    #     self.accelerator.wait_for_everyone()
 
     def calculate_loss_from_replay(self):
         """Calculate GFlowNet loss from replay buffer"""
@@ -210,7 +214,7 @@ class GFlowNet(pl.LightningModule):
                 # 시퀀스 길이 제한으로 메모리 사용량 감소
                 # max_seq_length = min(len(sequence_str), 100)  # 최대 100개 아미노산까지만 처리
                 max_seq_length = len(sequence_str)
-                print(f"Processing sequence of length {len(sequence_str)} with max_seq_length {max_seq_length}")
+                # print(f"Processing sequence of length {len(sequence_str)} with max_seq_length {max_seq_length}")
                 sequence_str = sequence_str[:max_seq_length]
                 
                 # 메모리 효율적인 처리를 위해 위치별로 하나씩 처리
@@ -312,15 +316,38 @@ class GFlowNet(pl.LightningModule):
         ###### Does not save any memory to delete protein_tensors ######
         
         return average_distance, total_distance, num_pairs
-
-    def identify_high_conf_mutations(self, log_probs, tokenizer, WT, high_conf_threshold):
-        """Identify high-confidence mutations based on probabilities exceeding the threshold."""
-        all_tokens = list(tokenizer.get_vocab().keys())[4:24]  # ESM2 amino acid tokens
-        WT_token_ids = [tokenizer.convert_tokens_to_ids(wt) - 4 for wt in WT if wt in tokenizer.get_vocab()]
+    
+    def log_probabilities(self, model, sequence=None):
+        # Calculate log probabilities for each position
+        log_states = torch.zeros((len(sequence), 20), dtype=torch.bfloat16).to(self.device)
         
-        high_conf_mutations = {}
-        for pos, wt_token_id in enumerate(WT_token_ids):
-            if pos < log_probs.shape[0]:
+        if sequence is None:
+            sequence = self.WT
+        
+        with torch.no_grad():
+            model.to(self.device)
+            model.eval()
+            for mask_pos in range(len(sequence)):
+                masked_sequence = self.mask_sequence(sequence, mask_pos)
+                inputs = self.tokenizer(masked_sequence, return_tensors="pt").to(self.device)
+                logits = model(**inputs).logits[:,:,4:24]
+                log_probabilities = F.log_softmax(logits[0, mask_pos + 1], dim=-1)
+                log_states[mask_pos] = log_probabilities
+
+            model.train()
+
+        return log_states
+
+    def identify_high_conf_mutations(self, log_probs, tokenizer, WT, high_conf_threshold, num_muts):
+        """Identify high-confidence mutations with adaptive threshold and mutation count adjustment."""
+        max_high_conf_threshold = 0.99
+        
+        while True:
+            all_tokens = list(tokenizer.get_vocab().keys())[4:24]  # ESM2 amino acid tokens
+            WT_token_ids = [tokenizer.convert_tokens_to_ids(wt) - 4 for wt in WT if wt in tokenizer.get_vocab()]
+            
+            high_conf_mutations = {}
+            for pos, wt_token_id in enumerate(WT_token_ids):
                 pos_probs = torch.exp(log_probs[pos]).to(self.device)
                 high_conf_tokens = [
                     (all_tokens[token_id], prob.item())
@@ -329,112 +356,267 @@ class GFlowNet(pl.LightningModule):
                 ]
                 if high_conf_tokens:
                     high_conf_mutations[pos + 1] = high_conf_tokens
-                    
-        return high_conf_mutations
-
-
-    def generate_mutated_sequence(self, wt_sequence, generation_id):
-        """Generate a mutated sequence using ESM2 model"""
-        print("Generating mutated sequence...")
-        # Get the sequence string
-        sequence = wt_sequence if isinstance(wt_sequence, str) else wt_sequence[0]
-        print(f"WT Sequence: {sequence}")
-
-
-        ##--------log probabilities--------#
-        # Calculate log probabilities for each position
-        log_states = torch.zeros((len(sequence), 20), dtype=torch.bfloat16).to(self.device)
-        
-        with torch.no_grad():
-            self.rl_updated_model.to(self.device)
-            self.rl_updated_model.eval()
-            for mask_pos in range(len(sequence)):
-                masked_sequence = self.mask_sequence(sequence, mask_pos)
-                inputs = self.tokenizer(masked_sequence, return_tensors="pt").to(self.device)
-                logits = self.rl_updated_model(**inputs).logits[:,:,4:24]
-                log_probabilities = F.log_softmax(logits[0, mask_pos + 1], dim=-1)
-                log_states[mask_pos] = log_probabilities
             
-            self.rl_updated_model.train()
-        
-        ##--------action--------#
-        # 1. 동적 온도값 조정 (시간과 generation_id에 따라)
-        dynamic_temp = self.temperature * (1 + 0.2 * np.sin(generation_id * np.pi / 4))
-        dynamic_temp = max(0.3, min(1.2, dynamic_temp))
-        
-        # 2. 동적 임계값 조정
-        dynamic_threshold = self.high_conf_threshold + 0.1 * np.cos(generation_id * np.pi / 3)
-        dynamic_threshold = max(0.4, min(0.8, dynamic_threshold))
-
-        # Identify high confidence mutations
-        high_conf_mutations = self.identify_high_conf_mutations(log_states, self.tokenizer, sequence, dynamic_threshold)
-        print(f"High confidence mutations identified at positions: {list(high_conf_mutations.keys())}")
-
-        # Apply high confidence mutations
-        mutated_seq = list(sequence)
-        for pos, mutations in high_conf_mutations.items():
-            if mutations:
-                max_token, max_prob = max(mutations, key=lambda x: x[1])
-                if pos - 1 < len(mutated_seq):
-                    mutated_seq[pos - 1] = max_token
-        
-        # Add additional random mutations up to num_mutations
-        positions_to_mutate = list(range(len(sequence)))
-        random.shuffle(positions_to_mutate)
-        
-        current_mutations = self.hamming_distance(''.join(mutated_seq), sequence)
-        for pos in positions_to_mutate:
-            if current_mutations >= self.num_mutations:
+            # print(f"Found {len(high_conf_mutations)} high-confidence positions with threshold {high_conf_threshold:.3f}")
+            
+            # 만약 high-confidence mutation 개수가 num_muts보다 적으면 종료
+            if len(high_conf_mutations) < num_muts:
+                print(f"High-confidence mutations ({len(high_conf_mutations)}) < target mutations ({num_muts}). Accepting current mutations.")
                 break
                 
-            if pos < len(mutated_seq) and mutated_seq[pos] == sequence[pos]:
-                masked_seq = mutated_seq.copy()
-                masked_seq[pos] = self.tokenizer.mask_token
-                masked_seq_str = ''.join(masked_seq)
+            # threshold가 최대값에 도달하면 num_muts 증가
+            if high_conf_threshold >= max_high_conf_threshold:
+                num_muts = len(high_conf_mutations) + 1  # num_muts 자동 증가!
+                print(f"Max threshold reached. Increasing num_muts from {num_muts-1} to {num_muts}.")
+                break
                 
-                inputs = self.tokenizer(masked_seq_str, return_tensors="pt").to(self.device)
-                with torch.no_grad():
-                    self.rl_updated_model.eval()
-                    logits = self.rl_updated_model(**inputs).logits[0, pos + 1, 4:24]
-                    probabilities = F.softmax(logits / self.temperature, dim=-1)
-                    
-                    sampled_idx = torch.multinomial(probabilities, 1).item()
-                    new_amino_acid_id = sampled_idx + 4
-                    new_amino_acid = self.tokenizer.convert_ids_to_tokens([new_amino_acid_id])[0]
-                    
-                    if new_amino_acid != sequence[pos]:
-                        mutated_seq[pos] = new_amino_acid
-                        current_mutations += 1
+            # threshold 증가하여 high-confidence mutation 개수 줄이기 시도
+            high_conf_threshold = min(high_conf_threshold * 1.01, max_high_conf_threshold)
+            # print(f"Too many high-confidence mutations ({len(high_conf_mutations)}). Increasing threshold to {high_conf_threshold:.3f}")
+        
+        print(f"Final: {len(high_conf_mutations)} high-confidence mutations, num_muts={num_muts}, threshold={high_conf_threshold:.3f}")
+        return high_conf_mutations, num_muts, high_conf_threshold
 
+    def identify_candidate_positions(self, log_states, WT, cum_prob_threshold, tokenizer, for_aligned_model=False):
+        """
+        Identify candidate positions with cumulative probability > threshold for non-wildtype amino acids.
+        Args:
+            new_log_states (torch.Tensor): Log probabilities for each position (shape: num_positions x vocab_size).
+            WT : Wild-type string.
+            cum_prob_threshold (float): Threshold for cumulative probability to consider a position.
+        Returns:
+            rl_candidate_positions (list): Indices of candidate positions.
+            rl_normalized_weights (list): Normalized weights for candidate positions
+        """
+        WT_tokens = [tokenizer.convert_tokens_to_ids(wt) - 4 for wt in WT]
+        probabilities = torch.exp(log_states).to(self.device)
+
+        # Re-identify candidate positions until there are at least 5 positions
+        max_iterations = 100  # 최대 반복 횟수 제한
+        iteration = 0
+        while iteration < max_iterations:
+            rl_candidate_positions = []
+            rl_position_weights = []
+        
+            # Calculate cumulative probability for non-wildtype amino acids
+            for i, position_probs in enumerate(probabilities):
+                non_wt_prob = position_probs.sum() - position_probs[WT_tokens[i]]
+                if non_wt_prob > cum_prob_threshold:
+                    rl_candidate_positions.append(i)
+                    rl_position_weights.append(non_wt_prob.item())
+
+            if len(rl_candidate_positions) >= 25:  # Stop if the number of candidate positions drops below threshold
+                break
+
+            # Decrease threshold by 5% if len(rl_candidate_positions) < 5
+            cum_prob_threshold *= 0.99
+            print(f"Threshold decreased to {cum_prob_threshold:.4f} due to insufficient candidate positions.")
+            iteration += 1
+
+        # 반복 횟수 초과 시 경고 메시지
+        if iteration >= max_iterations:
+            print(f"Warning: Maximum iterations ({max_iterations}) reached. Using {len(rl_candidate_positions)} candidate positions.")
+
+        rl_total_weight = sum(rl_position_weights)
+        rl_normalized_weights = [w / rl_total_weight for w in rl_position_weights] if rl_total_weight > 0 else []
+
+        # Print detailed information about candidate positions
+        if for_aligned_model:
+            print(f"Number of candidate positions: {len(rl_candidate_positions)}")
+
+        return rl_candidate_positions, rl_normalized_weights, cum_prob_threshold
+
+    def generate_mutated_sequence(self, wt_sequence):
+        """ACTION: Generate a mutated sequence using ESM2 model with adaptive mutation count"""
+        print("Generating mutated sequence...")
+        # Get the sequence string
+        wt_sequence = wt_sequence if isinstance(wt_sequence, str) else wt_sequence[0]
+        print(f"WT Sequence: {wt_sequence}")
+
+        ##--------log probabilities--------#
+        # Store initial values
+        initial_num_muts = self.num_mutations
+
+        if self.current_epoch == 0:
+            self.fixed_model.to(self.device)
+            # Generate single mutant log probs for fixed model during the first epoch
+            self.init_log_states = self.log_probabilities(self.fixed_model, sequence=wt_sequence)
+            self.fixed_model.to('cpu')
+
+        self.rl_updated_model.to(self.device)
+        new_log_states = self.log_probabilities(self.rl_updated_model, sequence=wt_sequence)
+        self.rl_updated_model.to('cpu')
+
+        ##--------identify_high_conf_mutations--------#
+        while True:    
+            # # 1. 동적 온도값 조정 (시간과 generation_id에 따라)
+            # dynamic_temp = self.temperature * (1 + 0.2 * np.sin(generation_id * np.pi / 4))
+            # dynamic_temp = max(0.3, min(1.2, dynamic_temp))
+            
+            # # 2. 동적 임계값 조정
+            # dynamic_threshold = self.high_conf_threshold + 0.1 * np.cos(generation_id * np.pi / 3)
+            # dynamic_threshold = max(0.4, min(0.8, dynamic_threshold))
+
+            # Identify high confidence mutations with adaptive adjustment
+            rl_high_conf_mutations, self.num_mutations, final_threshold = self.identify_high_conf_mutations(
+                new_log_states, self.tokenizer, wt_sequence, self.high_conf_threshold, self.num_mutations
+            )
+            fixed_high_conf_mutations, self.num_mutations, final_threshold = self.identify_high_conf_mutations(
+                self.init_log_states, self.tokenizer, wt_sequence, self.high_conf_threshold, self.num_mutations
+            )
+            
+            print(f"High confidence mutations identified at positions: {list(rl_high_conf_mutations.keys())}")
+            
+            # num_mutations가 증가했다면 다시 시작
+            if self.num_mutations > initial_num_muts:
+                print(f"num_mutations increased from {initial_num_muts} to {self.num_mutations}. Restarting action...")
+                initial_num_muts = self.num_mutations
+                continue  # 루프 재시작
+            
+            break  # num_mutations가 안정적이면 종료
+
+        ##--------generate_mutated_sequences--------#
+        fixed_mutated_seqs = [] # Mutated sequences from fixed model
+        rl_mutated_seqs = [] # Mutated sequences from aligned model
+
+        # Calculate single mutant probability space for sequence with high confidence mutations from fixed model (constant throughout training)
+        if self.current_epoch == 0:
+            # Generate sequences for fixed model for 1st iteration of epoch
+            fixed_mutated_seq = list(self.WT)
+            for pos, mutations in fixed_high_conf_mutations.items():
+                max_token, max_prob = max(mutations, key=lambda x: x[1])
+                fixed_mutated_seq[pos - 1] = max_token
+            self.fixed_high_conf_seq = "".join(fixed_mutated_seq)
+            fixed_sequences_with_high_confidence_mutations = [self.fixed_high_conf_seq] * self.number_generation
+            print(f"Generated sequence with high confidence mutations from fixed model: {fixed_high_conf_mutations}")
+
+            self.init_log_states = self.log_probabilities(self.fixed_model, sequence=self.fixed_high_conf_seq)
+            self.fixed_candidate_positions, self.fixed_normalized_weights, self.cum_prob_threshold = self.identify_candidate_positions(self.init_log_states, self.WT, self.cum_prob_threshold, self.tokenizer)
+            # print('Generated candidate positions from fixed model and normalized weights')
+        else:
+            fixed_sequences_with_high_confidence_mutations = [self.fixed_high_conf_seq] * self.number_generation
+
+        # Apply high confidence mutations
+        self.rl_updated_model.to(self.device)
+        rl_mutated_seq = list(wt_sequence)
+        positions_to_mask = list(rl_high_conf_mutations.keys())
+        for pos, mutations in rl_high_conf_mutations.items():
+            if mutations:
+                max_token, max_prob = max(mutations, key=lambda x: x[1])
+                if pos - 1 < len(rl_mutated_seq):
+                    rl_mutated_seq[pos - 1] = max_token
+        rl_high_conf_seq = "".join(rl_mutated_seq)
+        rl_sequences_with_high_confidence_mutations = [rl_high_conf_seq] * self.number_generation
+        print(f"Generated sequence with high confidence mutations from aligned model: {rl_high_conf_seq}")
+
+        # # Create masked sequences by masking the high-confidence mutation positions
+        # rl_mutated_seq = list(wt_sequence)
+        # for pos in positions_to_mask:
+        #     rl_mutated_seq[pos - 1] = self.tokenizer.mask_token  # Adjust for 0-indexed list
+        # masked_rl_mutated_seq = "".join(rl_mutated_seq)
+        self.rl_updated_model.to(self.device)
+        new_log_states_with_high_conf_mutations = self.log_probabilities(self.rl_updated_model, sequence=wt_sequence)
+        self.rl_updated_model.to('cpu')
+
+        rl_candidate_positions, rl_normalized_weights, self.cum_prob_threshold = self.identify_candidate_positions(new_log_states_with_high_conf_mutations, self.WT, self.cum_prob_threshold, self.tokenizer, for_aligned_model=True)
+
+        # Add additional random mutations up to num_mutations
+        for seq in rl_sequences_with_high_confidence_mutations:
+            mutated_seq = list(seq)
+            while self.hamming_distance(mutated_seq, self.WT) < self.num_mutations:
+                
+                # Randomly choose a candidate position
+                selected_pos = random.choices(rl_candidate_positions, weights=rl_normalized_weights, k=1)[0]
+                # print(f"Selected position {selected_pos} for mutation in sequence {seq_idx}")
+                
+                # Calculate log prob for amino acid mutation for aligned model
+                mutated_seq[selected_pos] = self.tokenizer.mask_token  # Use <mask> token
+                masked_seq_str = ''.join(mutated_seq)
+                # print('masked_seq_str', masked_seq_str)
+                inputs = self.tokenizer(masked_seq_str, return_tensors="pt").to(self.device)
+                self.rl_updated_model.to(self.device)
+                self.rl_updated_model.eval()
+                rl_outputs = self.rl_updated_model(**inputs)
+                self.rl_updated_model.train()
+                rl_logits = rl_outputs.logits[0, selected_pos + 1, 4:24]
+                rl_log_probabilities_pos = F.log_softmax(rl_logits, dim=-1)
+                rl_probabilities_pos = torch.exp(rl_log_probabilities_pos).to(self.device)
+                # print('fixed_probabilities_pos', fixed_probabilities_pos)
+                sampled_idx = torch.multinomial(rl_probabilities_pos, 1).item()
+                new_amino_acid_id = sampled_idx + 4 # Map to actual token ID range for amino acids
+                new_amino_acid = self.tokenizer.convert_ids_to_tokens([new_amino_acid_id])[0]
+                mutated_seq[selected_pos] = new_amino_acid
+
+            # Convert tokenized mutated sequence back to amino acid string
+            mutated_seq = ''.join(mutated_seq)
+            rl_mutated_seqs.append(mutated_seq)
+            
+        # Convert tokenized mutated sequence back to amino acid string
+        rl_mutated_seq = ''.join(rl_mutated_seq)
+        
         # Clear the GPU memory cache
         if torch.cuda.is_available():
             self.rl_updated_model.to('cpu')
             torch.cuda.empty_cache() # Frees 2.722 GB
             print("Cleared GPU cache after log probability calculation.")
+        
+        # Generate designs with 5 mutations from fixed model
+        self.fixed_model.to(self.device)
+        mut_idx = self.hamming_distance(self.fixed_high_conf_seq, wt_sequence)
+        for seq in fixed_sequences_with_high_confidence_mutations:
+            mutated_seq = list(seq)
+            # print('mutated_seq', mutated_seq)
 
-        mutated_seq = ''.join(mutated_seq)
-        print(f"Mutated Sequence: {mutated_seq}")
+            with torch.no_grad(): 
+                while self.hamming_distance(mutated_seq, wt_sequence) < self.num_mutations:
+                    # Randomly choose a candidate position
+                    selected_pos = random.choices(self.fixed_candidate_positions, weights=self.fixed_normalized_weights, k=1)[0]
+                    # print('selected_pos', selected_pos)
+                    
+                    # Calculate log prob for amino acid mutation for aligned model (if site is actually mutated)
+                    mutated_seq[selected_pos] = self.tokenizer.mask_token  # Use <mask> token
+                    masked_seq_str = ''.join(mutated_seq)
+                    # print('masked_seq_str', masked_seq_str)
+                    inputs = self.tokenizer(masked_seq_str, return_tensors="pt").to(self.device)
+                    self.fixed_model.eval()
+                    fixed_outputs = self.fixed_model(**inputs)
+                    fixed_logits = fixed_outputs.logits[0, selected_pos + 1, 4:24]  # Adjust this range based on valid amino acid tokens
+                    fixed_log_probabilities_pos = F.log_softmax(fixed_logits, dim=-1)
+                    fixed_probabilities_pos = torch.exp(fixed_log_probabilities_pos).to(self.device)
+                    # print('fixed_probabilities_pos', fixed_probabilities_pos)
+                    sampled_idx = torch.multinomial(fixed_probabilities_pos, 1).item()
+                    new_amino_acid_id = sampled_idx + 4  # Map to actual token ID range for amino acids
+                    new_amino_acid = self.tokenizer.convert_ids_to_tokens([new_amino_acid_id])[0]
+                    mutated_seq[selected_pos] = new_amino_acid
+                    mut_idx = self.hamming_distance(mutated_seq, wt_sequence)
 
-        return mutated_seq
+                # Convert tokenized mutated sequence back to amino acid string
+                mutated_seq = ''.join(mutated_seq)
+                fixed_mutated_seqs.append(mutated_seq)
+    
+        # Clear the GPU memory cache
+        if torch.cuda.is_available():
+            self.fixed_model.to('cpu')
+            torch.cuda.empty_cache() # Frees 2.722 GB
+            print("Cleared GPU cache after log probability calculation.")
+
+        print(f"Mutated Sequences num: {len(rl_mutated_seqs)}")
+        print(f"Fixed Mutated Sequences num: {len(fixed_mutated_seqs)}")
+
+        return rl_mutated_seqs, fixed_mutated_seqs
 
     def generate(self, wt_sequence):
         """Generate mutated sequences and calculate rewards"""
         mean_rewards = torch.tensor([], device=self.device)
         ###print(f"Original sequences: {wt_sequence}")
 
-        generated_sequences = []
-    
-        # 여러 번 생성하여 다양성 확보
-        for i in range(self.number_generation):
-            mutated_seq = self.generate_mutated_sequence(wt_sequence[0], generation_id=i)
-            generated_sequences.append(mutated_seq)
+        mutated_seqs, pretrained_mutated_seqs = self.generate_mutated_sequence(wt_sequence[0])
 
         # Calculate rewards for generated sequences
-        if len(generated_sequences) > 0:
-            fitness_values, rel_WT_fitness = self.calculate_reward(generated_sequences)
-            
+        if len(mutated_seqs) > 0:
+            fitness_values, rel_WT_fitness = self.calculate_reward(mutated_seqs, pretrained_mutated_seqs)
             # Store sequences in replay buffer with rewards
-            for i, seq in enumerate(generated_sequences):
+            for i, seq in enumerate(mutated_seqs):
                 # Create dummy step rewards and other required data
                 step_rewards = [(fitness_values.item(), True)]
                 mean_reward = fitness_values.item()
@@ -447,7 +629,7 @@ class GFlowNet(pl.LightningModule):
                     prompt_tokens, seq_tokens, step_rewards, mean_reward, 10
                 )
 
-        mean_rewards = fitness_values if len(generated_sequences) > 0 else torch.tensor(0.0)
+        mean_rewards = fitness_values if len(mutated_seqs) > 0 else torch.tensor(0.0)
         return mean_rewards
 
     def step(self):
@@ -493,10 +675,10 @@ class GFlowNet(pl.LightningModule):
             print("Not enough samples in replay buffer to perform training step.")
             return torch.tensor(0.0, requires_grad=True)
         
-        if (self.current_epoch != 0) & ((self.current_epoch+1) % self.save_every_n_epochs == 0):
-            # Use the logger version number in the filename
-            self.save_rl_updated_model()
-            print(f'Saving models at epoch {self.current_epoch}')
+        # if (self.current_epoch != 0) & ((self.current_epoch+1) % self.save_every_n_epochs == 0):
+        #     # Use the logger version number in the filename
+        #     self.save_rl_updated_model()
+        #     print(f'Saving models at epoch {self.current_epoch}')
 
     def save_model(self, path):
         """Save the model"""

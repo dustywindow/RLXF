@@ -17,14 +17,14 @@ model_name = f"facebook/{model_identifier}"
 num_reward_models = 2
 filepath = 'GFlowNets'
 save_filepath = f'./logs/{filepath}_{model_identifier}'
-version = 2
+version = 10
 epochs = 1000
 
 # parameters for generating designs after alignment
 num_designs = 100
 num_muts = 5
-high_conf_threshold = 0.9
-cum_prob_threshold = 0.25
+high_conf_threshold = 0.7
+cum_prob_threshold = 0.1
 ep = epochs - 1
 generation_seed = 7028
 

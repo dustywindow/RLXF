@@ -91,7 +91,7 @@ def set_environment_variables():
     os.environ["NCCL_P2P_LEVEL"] = "NVL"
     os.environ["NCCL_P2P_DISABLE"] = "0"
 
-def load_model_and_tokenizer(model_name, num_reward_models):
+def load_model_and_tokenizer(model_name, num_reward_models, model_identifier):
     rl_updated_model = AutoModelForMaskedLM.from_pretrained(
         model_name,
         torch_dtype=torch.bfloat16,  # 메모리 절약
@@ -102,6 +102,25 @@ def load_model_and_tokenizer(model_name, num_reward_models):
     tokenizer = AutoTokenizer.from_pretrained(model_name)
     # tokenizer.pad_token = tokenizer.eos_token
     # tokenizer.padding_side = "left"
+
+    logger_name = f'SFT_{model_identifier}'
+    sft_logger_version = 0
+    sft_model_path = f'./logs/{logger_name}/version_{sft_logger_version}/SFT_{model_identifier}_v{sft_logger_version}.pt'
+    sft_model = AutoModelForMaskedLM.from_pretrained(f"facebook/{model_identifier}")
+
+    if sft_model_path is not None:
+        # Begin PPO with 2 copies of supervised fine-tuned models
+        state_dict = torch.load(sft_model_path)
+        sft_model.load_state_dict(state_dict)
+        rl_updated_model.load_state_dict(state_dict)
+        for param in sft_model.parameters():
+            param.requires_grad = False
+        print(f'Aligning supervised fine-tuned model from {sft_model_path}')
+    else:
+        # Begin PPO with 2 copies of pretrained models
+        for param in sft_model.parameters():
+            param.requires_grad = False
+        print(f'Aligning {model_identifier} model from huggingface')
 
     # load ensemble of reward models
     reward_models = []
@@ -114,11 +133,11 @@ def load_model_and_tokenizer(model_name, num_reward_models):
             param.requires_grad = False
         reward_models.append(reward_model)
 
-    return rl_updated_model, tokenizer, reward_models
+    return rl_updated_model, tokenizer, reward_models, sft_model
 
 
 def mini_train(prot_type, batch_size, epoch, model_identifier, model_name, num_reward_models, saved_model_path, save_every_n_epochs):
-    rl_updated_model, tokenizer, reward_model = load_model_and_tokenizer(model_name, num_reward_models)
+    rl_updated_model, tokenizer, reward_model, sft_model = load_model_and_tokenizer(model_name, num_reward_models, model_identifier)
 
     if prot_type == 'CreiLOV':
          WT = 'MAGLRHTFVVADATLPDCPLVYASEGFYAMTGYGPDEVLGHNARFLQGEGTDPKEVQKIRDAIKKGEACSVRLLNYRKDGTPFWNLLTVTPIKTPDGRVSKFVGVQVDVTSKTEGKALA'
@@ -134,7 +153,7 @@ def mini_train(prot_type, batch_size, epoch, model_identifier, model_name, num_r
     csv_logger = CSVLogger('logs', name=f"GFlowNets_{model_identifier}")
     wandb_logger = WandbLogger(
             project="RLXF",
-            name=f"GFlowNets_{model_identifier}_{type}_{num_reward_models}_reward_models_{epoch}_epochs_{seed}_seed",
+            name=f"GFlowNets_{model_identifier}_{prot_type}_{num_reward_models}_reward_models_{epoch}_epochs_{seed}_seed",
             group=run_group_name,
             config={
                 "model_parameters" : {
@@ -183,6 +202,7 @@ def mini_train(prot_type, batch_size, epoch, model_identifier, model_name, num_r
         rl_updated_model=rl_updated_model,
         tokenizer=tokenizer,
         reward_model=reward_model,
+        sft_model=sft_model,
         accelerator=accelerator,
         WT=WT,
         predicted_WT_fitness=predicted_WT_fitness,
