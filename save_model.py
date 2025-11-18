@@ -23,8 +23,8 @@ epochs = 1000
 # parameters for generating designs after alignment
 num_designs = 100
 num_muts = 5
-high_conf_threshold = 0.7
-cum_prob_threshold = 0.1
+high_conf_threshold = 0.9
+cum_prob_threshold = 0.25
 ep = epochs - 1
 generation_seed = 7028
 
@@ -49,16 +49,42 @@ try:
     # Lightning checkpoint 형식인 경우
     checkpoint = torch.load(rl_checkpoint_path, map_location='cpu')
     
-    # 체크포인트에서 state_dict 추출 (Lightning 체크포인트의 경우 'state_dict' 키에 저장됨)
     if 'state_dict' in checkpoint:
         state_dict = checkpoint['state_dict']
-        # Lightning에서는 키 앞에 모듈명이 붙을 수 있으므로 필요시 제거
+
+        # # 모든 키 출력하여 구조 파악
+        # i = 0
+        # print("All keys in checkpoint:")
+        # for key in sorted(state_dict.keys())[:-1]:  # 처음 20개만 출력
+        #     # print(f"  {key}")
+        #     i += 1
+        # print(f"Total keys: {i}")
+                
         new_state_dict = {}
+
+        # 먼저 rl_updated_model prefix로 시도
         for key, value in state_dict.items():
-            # 'model.' 또는 'rl_updated_model.' 등의 prefix 제거
-            new_key = key.replace('model.', '').replace('rl_updated_model.', '')
-            new_state_dict[new_key] = value
-        rl_updated_model.load_state_dict(new_state_dict)
+            if key.startswith('rl_updated_model.'):
+                new_key = key.replace('rl_updated_model.', '')
+                new_state_dict[new_key] = value
+
+        # rl_updated_model prefix가 없으면 model prefix로 시도
+        if not new_state_dict:
+            for key, value in state_dict.items():
+                if key.startswith('model.'):
+                    new_key = key.replace('model.', '')
+                    new_state_dict[new_key] = value
+        
+        # 그것도 없으면 전체 state_dict 사용
+        if not new_state_dict:
+            print("No 'model.' prefix found, using entire state_dict")
+            new_state_dict = state_dict
+        
+        if new_state_dict:
+            rl_updated_model.load_state_dict(new_state_dict)
+            print(f"Loaded {len(new_state_dict)} parameters")
+        else:
+            print("No compatible parameters found in checkpoint")
     else:
         # 단순 state_dict 형식인 경우
         rl_updated_model.load_state_dict(checkpoint)
@@ -80,7 +106,7 @@ for i in range(num_reward_models):
         param.requires_grad = False
     reward_models.append(reward_model)
 
-############################################################################################################################################################
+###########################################################################################################################################################
 
 """
 Save the state dictionary of the rl_updated_vae model to a file, for both the non-EMA and EMA-applied versions.
