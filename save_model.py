@@ -17,7 +17,7 @@ model_name = f"facebook/{model_identifier}"
 num_reward_models = 2
 filepath = 'GFlowNets'
 save_filepath = f'./logs/{filepath}_{model_identifier}'
-version = 10
+version = 0
 epochs = 1000
 
 # parameters for generating designs after alignment

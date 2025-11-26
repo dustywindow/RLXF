@@ -31,7 +31,7 @@ class GFlowNet(pl.LightningModule):
                  predicted_WT_fitness,
                  save_every_n_epochs,
                  pairwise_hd_aver_factor=1.0e-06,
-                 learning_rate=6e-6,
+                 learning_rate=3e-6,
                  number_generation=2,
                  subTB_lambda=1.0,
                  temperature=0.6,
@@ -162,10 +162,12 @@ class GFlowNet(pl.LightningModule):
         # total_reward = (fitness_advantage + self.pairwise_hd_aver_factor*pairwise_hd_aver - current_beta * dkl_value)
         # total_reward = (fitness_advantage + self.pairwise_hd_aver_factor*pairwise_hd_aver)
         total_reward = fitness_advantage
+        # total_reward = rl_fitness
 
         # Logging
         self.log("pairwise_hd_aver", pairwise_hd_aver, prog_bar=False, logger=True, on_step=True, on_epoch=False)
         self.log("fitness_advantage", fitness_advantage, prog_bar=True, logger=True, on_step=True, on_epoch=False)
+        self.log("rl_fitness", rl_fitness, prog_bar=False, logger=True, on_step=False, on_epoch=True)
         self.log("rel_WT_fitness", rel_WT_fitness, prog_bar=False, logger=True, on_step=False, on_epoch=True)
         self.log("total_reward", total_reward, prog_bar=False, logger=True, on_step=True, on_epoch=False)
         self.log('num_muts', float(self.num_mutations), on_step=True, on_epoch=False, prog_bar=False, logger=True)
