@@ -262,6 +262,13 @@ class GFlowNet(pl.LightningModule):
                     if len(rewards_tensor) > 0:
                         gfn_loss = torch.mean((forward_probs - torch.log(rewards_tensor + 1e-8)) ** 2)
                         batch_loss = batch_loss + gfn_loss
+
+                # if len(forward_probs) > 0:
+                #     # Calculate GFlowNet loss (simplified version)
+                #     log_pf = forward_probs.sum()
+                #     final_reward = step_rewards[0]
+                #     gfn_loss = torch.mean((log_pf - torch.log(final_reward + 1e-8)) ** 2)
+                #     batch_loss = batch_loss + gfn_loss
                 
                 sum_rewards += torch.mean(step_rewards)
                 sum_mean_reward += mean_reward

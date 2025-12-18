@@ -779,8 +779,7 @@ class PPO_ESM2(pl.LightningModule):
         # Emptying cache frees 0 MB here
 
         # Calculate fitness
-        # predicted_WT_fitness = 4.1498 # Predicted WT score
-        predicted_WT_fitness = 8.0
+        predicted_WT_fitness = 4.1498 # Predicted WT score
         rl_fitness_per_sequence = torch.quantile(scores_tensor, 0.05, dim=0)
         pre_fitness_per_sequence = torch.quantile(pre_scores_tensor, 0.05, dim=0)
         print(f"RL-updated mean fitness: {rl_fitness_per_sequence.mean()}")
